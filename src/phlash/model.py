@@ -5,6 +5,7 @@ from jax.scipy.special import xlogy
 from jaxtyping import Array, Float, Float64, Int8, Int64
 
 import phlash.hmm
+from phlash.ld import ld_log_likelihood
 from phlash.params import MCMCParams, PSMCParams
 
 
@@ -23,12 +24,13 @@ def log_prior(mcp: MCMCParams) -> float:
 
 def log_density(
     mcp: MCMCParams,
-    c: Float64[Array, "3"],
+    c: Float64[Array, "4"],
     inds: Int64[Array, "batch"],
     warmup: Int8[Array, "c ell"],
     kern: "phlash.gpu.PSMCKernel",
     afs: Int64[Array, "n"],
     afs_transform: Float[Array, "m n"] = None,
+    ld_data: dict | None = None,
 ) -> float:
     r"""
     Computes the log density of a statistical model by combining the contributions from
@@ -68,6 +70,7 @@ def log_density(
         l3 = xlogy(T @ afs, T @ esfs).sum()
     else:
         l3 = 0.0
-    ll = jnp.array([l1, l2, l3])
+    l4 = ld_log_likelihood(dm, ld_data)
+    ll = jnp.array([l1, l2, l3, l4])
     ret = jnp.dot(c, ll)
     return jnp.where(jnp.isfinite(ret), ret, -jnp.inf)

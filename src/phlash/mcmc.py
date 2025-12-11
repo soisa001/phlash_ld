@@ -11,6 +11,7 @@ from loguru import logger
 
 from phlash.afs import bws_transform, fold_transform
 from phlash.data import Contig, init_mcmc_data
+from phlash.ld import estimate_ld_stats
 from phlash.kernel import get_kernel
 from phlash.model import log_density
 from phlash.params import MCMCParams
@@ -214,6 +215,7 @@ def fit(
         d = test_data.get_data(window_size)
         test_afs = d["afs"]
         test_data = d["het_matrix"][:max_samples]
+        ld_data = estimate_ld_stats(test_data, window_size, options.get("ld_max_lag", 10))
         N_test = test_data.shape[0]
         test_kern = get_kernel(
             M=M,
@@ -227,23 +229,27 @@ def fit(
             def _elpd_ll(mcp):
                 return log_density(
                     mcp,
-                    c=jnp.array([0.0, 1.0, 1.0]),
+                    c=jnp.array([0.0, 1.0, 1.0, options.get("ld_weight", 1.0)]),
                     inds=jnp.arange(N_test),
                     kern=test_kern,
                     warmup=jnp.full([N_test, 1], -1, dtype=jnp.int8),
                     afs=test_afs,
                     afs_transform=afs_transform,
+                    ld_data=ld_data,
                 )
 
             return _elpd_ll(mcps).mean()
+    else:
+        ld_data = None
 
     # to have unbiased gradient estimates, need to pre-multiply the chunk term by ratio
     # (dataset size) / (minibatch size) = N / S.
     kw = dict(
         kern=train_kern,
-        c=jnp.array([1.0, N / S, 1.0]),
+        c=jnp.array([1.0, N / S, 1.0, options.get("ld_weight", 1.0)]),
         afs=afs,
         afs_transform=afs_transform,
+        ld_data=ld_data,
     )
 
     # build the plot callback
