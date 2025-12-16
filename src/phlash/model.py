@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jax import vmap
 from jax.scipy.special import xlogy
 from jaxtyping import Array, Float, Float64, Int8, Int64
+from typing import Optional
 
 import phlash.hmm
 from phlash.params import MCMCParams, PSMCParams
@@ -23,26 +24,34 @@ def log_prior(mcp: MCMCParams) -> float:
 
 def log_density(
     mcp: MCMCParams,
-    c: Float64[Array, "3"],
+    c: Float64[Array, "4"],
     inds: Int64[Array, "batch"],
     warmup: Int8[Array, "c ell"],
     kern: "phlash.gpu.PSMCKernel",
     afs: Int64[Array, "n"],
     afs_transform: Float[Array, "m n"] = None,
+    ld_stats: Optional[Float[Array, "k"]] = None,
+    ld_bp_bins: Optional[Float[Array, "k1"]] = None,
+    ld_recomb_rate: float = 1e-8,
 ) -> float:
     r"""
     Computes the log density of a statistical model by combining the contributions from
-    the prior, the hidden Markov model (HMM), and the allele frequency spectrum (AFS)
-    model, weighted by given coefficients.
+    the prior, the hidden Markov model (HMM), the allele frequency spectrum (AFS)
+    model, and optionally the linkage disequilibrium (LD) model, weighted by given 
+    coefficients.
 
     Args:
         mcp: The Markov Chain Monte Carlo parameters used to specify the model.
-        c: Weights for each component of the density - prior, HMM model, and AFS model.
+        c: Weights for each component of the density - prior, HMM model, AFS model,
+           and LD model. Should be length 4: [c_prior, c_hmm, c_afs, c_ld].
         inds: Mini-batch indices for selecting subsets of the data.
-        data: Data matrix used in the model computation.
+        warmup: Warmup data for HMM initialization.
         kern: An instantiated PSMC Kernel used in the computation.
         afs: The allele frequency spectrum data.
-        use_folded_afs: Whether to fold the afs, if ancestral allele is not known.
+        afs_transform: Optional transform matrix for AFS (e.g., folding/binning).
+        ld_stats: Optional observed LD statistics (sigmaD2 values per distance bin).
+        ld_bp_bins: Optional physical distance bins (bp) for LD computation.
+        ld_recomb_rate: Recombination rate per bp (default 1e-8).
 
     Returns:
         The log density, or negative infinity where the result is not finite.
@@ -53,8 +62,14 @@ def log_density(
         pp, warmup
     )  # (I, M)
     pps = vmap(lambda pi: pp._replace(pi=pi))(pis)
+    
+    # l1: Prior term
     l1 = log_prior(mcp)
+    
+    # l2: HMM likelihood term
     l2 = vmap(kern.loglik, (0, 0))(pps, inds).sum()
+    
+    # l3: AFS likelihood term
     if afs is not None:
         n = len(afs) + 1
         if afs_transform is None:
@@ -68,6 +83,33 @@ def log_density(
         l3 = xlogy(T @ afs, T @ esfs).sum()
     else:
         l3 = 0.0
-    ll = jnp.array([l1, l2, l3])
+    
+    # l4: LD likelihood term
+    if ld_stats is not None and ld_bp_bins is not None:
+        from phlash.ld import compute_expected_ld_jax
+        
+        # Compute expected LD from demographic model
+        expected_ld = compute_expected_ld_jax(
+            dm.eta,
+            dm.theta,
+            n_samples=20,
+            bp_bins=ld_bp_bins,
+            recomb_rate=ld_recomb_rate,
+        )
+        
+        # Normalize for likelihood computation
+        expected_ld_norm = expected_ld / expected_ld.sum()
+        expected_ld_norm = jnp.maximum(expected_ld_norm, 1e-20)
+        
+        # Normalize observed LD for comparison
+        ld_stats_norm = ld_stats / ld_stats.sum()
+        
+        # xlogy likelihood: sum of observed * log(expected)
+        l4 = xlogy(ld_stats_norm, expected_ld_norm).sum()
+    else:
+        l4 = 0.0
+    
+    ll = jnp.array([l1, l2, l3, l4])
     ret = jnp.dot(c, ll)
     return jnp.where(jnp.isfinite(ret), ret, -jnp.inf)
+

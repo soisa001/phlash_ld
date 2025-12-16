@@ -12,6 +12,11 @@ from loguru import logger
 from phlash.afs import bws_transform, fold_transform
 from phlash.data import Contig, init_mcmc_data
 from phlash.kernel import get_kernel
+from phlash.ld import (
+    DEFAULT_BP_BINS,
+    DEFAULT_RECOMB_RATE,
+    compute_empirical_ld_from_het_matrix,
+)
 from phlash.model import log_density
 from phlash.params import MCMCParams
 from phlash.size_history import DemographicModel
@@ -85,10 +90,40 @@ def fit(
     # the number of parallel workers. by default, use all cores, but this can take up
     # too much memory. set num_workers=1 to process the data sequentially.
     num_workers = options.get("num_workers")
+    # LD options
+    use_ld = options.get("use_ld", False)
+    ld_bp_bins = options.get("ld_bp_bins", DEFAULT_BP_BINS)
+    ld_recomb_rate = options.get("ld_recomb_rate", DEFAULT_RECOMB_RATE)
+    ld_stats = None
+    
     logger.info("Loading data")
     afs, chunks = init_mcmc_data(
         data, window_size, overlap, chunk_size, max_samples, num_workers
     )
+    
+    # Compute empirical LD if requested
+    if use_ld:
+        logger.info("Computing empirical LD statistics")
+        # Compute LD from the full het matrix before chunking
+        # We need to re-process data for LD computation
+        # For now, compute from chunks (approximate)
+        ld_stats_list = []
+        for chunk in chunks[:min(100, len(chunks))]:  # Sample chunks for LD
+            chunk_ld = compute_empirical_ld_from_het_matrix(
+                chunk[None, :],  # Add sample dimension
+                window_size=window_size,
+                bp_bins=ld_bp_bins,
+            )
+            if chunk_ld is not None:
+                ld_stats_list.append(chunk_ld)
+        
+        if ld_stats_list:
+            ld_stats = np.mean(ld_stats_list, axis=0)
+            logger.info(f"Computed LD statistics for {len(ld_bp_bins)-1} distance bins")
+        else:
+            logger.warning("Failed to compute LD statistics, disabling LD term")
+            use_ld = False
+    
     # to conserve memory, we get rid of data at this point
     del data
     # the mutation rate per generation, if known.
@@ -221,29 +256,42 @@ def fit(
             double_precision=False,
         )
 
+        # LD parameters for elpd computation
+        _ld_stats_elpd = jnp.array(ld_stats) if ld_stats is not None else None
+        _ld_bp_bins_elpd = jnp.array(ld_bp_bins) if use_ld else None
+        _ld_weight_elpd = 1.0 if use_ld else 0.0
+        
         @jit
         def elpd(mcps):
             @vmap
             def _elpd_ll(mcp):
                 return log_density(
                     mcp,
-                    c=jnp.array([0.0, 1.0, 1.0]),
+                    c=jnp.array([0.0, 1.0, 1.0, _ld_weight_elpd]),
                     inds=jnp.arange(N_test),
                     kern=test_kern,
                     warmup=jnp.full([N_test, 1], -1, dtype=jnp.int8),
                     afs=test_afs,
                     afs_transform=afs_transform,
+                    ld_stats=_ld_stats_elpd,
+                    ld_bp_bins=_ld_bp_bins_elpd,
+                    ld_recomb_rate=ld_recomb_rate,
                 )
 
             return _elpd_ll(mcps).mean()
 
     # to have unbiased gradient estimates, need to pre-multiply the chunk term by ratio
     # (dataset size) / (minibatch size) = N / S.
+    # LD weight: use 1.0 if enabled, 0.0 otherwise
+    ld_weight = 1.0 if use_ld else 0.0
     kw = dict(
         kern=train_kern,
-        c=jnp.array([1.0, N / S, 1.0]),
+        c=jnp.array([1.0, N / S, 1.0, ld_weight]),
         afs=afs,
         afs_transform=afs_transform,
+        ld_stats=jnp.array(ld_stats) if ld_stats is not None else None,
+        ld_bp_bins=jnp.array(ld_bp_bins) if use_ld else None,
+        ld_recomb_rate=ld_recomb_rate,
     )
 
     # build the plot callback
