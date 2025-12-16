@@ -228,7 +228,8 @@ def compute_expected_ld(
         import moments.Demes
     except ImportError:
         logger.warning("moments package not installed.")
-        return np.zeros(len(bp_bins) - 1)
+        # Return small positive values so downstream likelihoods remain well-defined
+        return np.ones(len(bp_bins) - 1) * 1e-10
     
     try:
         # Convert SizeHistory to demes Graph

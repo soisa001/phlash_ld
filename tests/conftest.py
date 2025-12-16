@@ -1,5 +1,7 @@
 import os.path
 
+import os
+
 import jax
 import numpy as np
 from pytest import fixture

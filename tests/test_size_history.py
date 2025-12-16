@@ -81,7 +81,7 @@ def test_tv(eta):
 def test_density(eta, rng):
     c = rng.normal() ** 2
     f = jax.jit(eta.density(c))
-    I, err = quad(f, 0.0, np.inf)
+    I, err = quad(f, 0.0, np.inf, limit=2000)
     np.testing.assert_allclose(I, 1.0, atol=err)
 
 
