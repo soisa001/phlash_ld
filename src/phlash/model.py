@@ -87,25 +87,33 @@ def log_density(
     # l4: LD likelihood term
     if ld_stats is not None and ld_bp_bins is not None:
         from phlash.ld import compute_expected_ld_jax
-        
-        # Compute expected LD from demographic model
-        expected_ld = compute_expected_ld_jax(
-            dm.eta,
-            dm.theta,
-            n_samples=20,
-            bp_bins=ld_bp_bins,
-            recomb_rate=ld_recomb_rate,
-        )
-        
-        # Normalize for likelihood computation
-        expected_ld_norm = expected_ld / expected_ld.sum()
-        expected_ld_norm = jnp.maximum(expected_ld_norm, 1e-20)
-        
-        # Normalize observed LD for comparison
-        ld_stats_norm = ld_stats / ld_stats.sum()
-        
-        # xlogy likelihood: sum of observed * log(expected)
-        l4 = xlogy(ld_stats_norm, expected_ld_norm).sum()
+
+        ld_stats_sum = ld_stats.sum()
+        if ld_stats_sum <= 0:
+            l4 = 0.0
+        else:
+            # Compute expected LD from demographic model
+            expected_ld = compute_expected_ld_jax(
+                dm.eta,
+                dm.theta,
+                n_samples=20,
+                bp_bins=ld_bp_bins,
+                recomb_rate=ld_recomb_rate,
+            )
+
+            expected_ld_sum = expected_ld.sum()
+            if expected_ld_sum <= 0:
+                l4 = 0.0
+            else:
+                # Normalize for likelihood computation
+                expected_ld_norm = expected_ld / expected_ld_sum
+                expected_ld_norm = jnp.maximum(expected_ld_norm, 1e-20)
+
+                # Normalize observed LD for comparison
+                ld_stats_norm = ld_stats / ld_stats_sum
+
+                # xlogy likelihood: sum of observed * log(expected)
+                l4 = xlogy(ld_stats_norm, expected_ld_norm).sum()
     else:
         l4 = 0.0
     

@@ -1,107 +1,86 @@
-"""Test script for LD implementation in phlash.
+"""Basic tests for the LD term and its integration in phlash."""
 
-This script tests:
-1. Import of the new LD module
-2. Basic LD computation from het matrix (no moments dependency)
-3. Model.py log_density with LD term
-"""
-
-import sys
-sys.path.insert(0, r"c:\HsiehLab\phlash\src")
-
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from phlash.kernel import get_kernel
+from phlash.ld import (
+    DEFAULT_BP_BINS,
+    DEFAULT_RECOMB_RATE,
+    bp_to_recomb_bins,
+    compute_empirical_ld_from_het_matrix,
+)
+from phlash.model import log_density
+from phlash.params import MCMCParams
 
 jax.config.update("jax_enable_x64", True)
 
-print("Testing phlash LD implementation...")
 
-# Test 1: Import LD module directly (avoiding phlash.__init__ which imports data.py -> pysam)
-print("\n1. Testing LD module imports...")
-try:
-    # Import ld module directly to avoid pysam dependency
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("ld", r"c:\HsiehLab\phlash\src\phlash\ld.py")
-    ld_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ld_module)
-    
-    DEFAULT_BP_BINS = ld_module.DEFAULT_BP_BINS
-    DEFAULT_RECOMB_RATE = ld_module.DEFAULT_RECOMB_RATE
-    bp_to_recomb_bins = ld_module.bp_to_recomb_bins
-    compute_empirical_ld_from_het_matrix = ld_module.compute_empirical_ld_from_het_matrix
-    print(f"   DEFAULT_BP_BINS: {DEFAULT_BP_BINS}")
-    print(f"   DEFAULT_RECOMB_RATE: {DEFAULT_RECOMB_RATE}")
-    print("   ✓ LD module imported successfully")
-except Exception as e:
-    print(f"   ✗ Import failed: {e}")
-    sys.exit(1)
+def test_ld_module_imports():
+    """Ensure defaults are available and conversions work."""
+    r_bins = bp_to_recomb_bins(DEFAULT_BP_BINS, DEFAULT_RECOMB_RATE)
+    np.testing.assert_allclose(r_bins, DEFAULT_BP_BINS * DEFAULT_RECOMB_RATE)
 
-# Test 2: bp_to_recomb_bins
-print("\n2. Testing bp_to_recomb_bins...")
-r_bins = bp_to_recomb_bins(DEFAULT_BP_BINS, DEFAULT_RECOMB_RATE)
-print(f"   r_bins: {r_bins}")
-assert len(r_bins) == len(DEFAULT_BP_BINS)
-print("   ✓ bp_to_recomb_bins works")
 
-# Test 3: Compute LD from het matrix
-print("\n3. Testing compute_empirical_ld_from_het_matrix...")
-# Create synthetic het matrix
-np.random.seed(42)
-het_matrix = (np.random.random((10, 500)) < 0.05).astype(np.int8)
-print(f"   het_matrix shape: {het_matrix.shape}")
+def test_compute_empirical_ld_from_het_matrix():
+    rng = np.random.default_rng(42)
+    het_matrix = (rng.random((6, 400)) < 0.05).astype(np.int8)
+    bp_bins = DEFAULT_BP_BINS[:6]
 
-ld_stats = compute_empirical_ld_from_het_matrix(
-    het_matrix,
-    window_size=100,
-    bp_bins=DEFAULT_BP_BINS,
-)
-print(f"   LD stats: {ld_stats}")
-print(f"   LD stats shape: {ld_stats.shape if ld_stats is not None else 'None'}")
-if ld_stats is not None:
-    print("   ✓ compute_empirical_ld_from_het_matrix works")
-else:
-    print("   ⚠ LD stats returned None (may be expected for small data)")
+    ld_stats = compute_empirical_ld_from_het_matrix(
+        het_matrix, window_size=50, bp_bins=bp_bins
+    )
 
-# Test 4: Import model with LD support
-print("\n4. Testing model.py with LD term...")
-try:
-    from phlash.model import log_density, log_prior
-    print("   ✓ model.py imported successfully")
-except Exception as e:
-    print(f"   ✗ Model import failed: {e}")
-    sys.exit(1)
+    assert ld_stats is not None
+    assert ld_stats.shape == (len(bp_bins) - 1,)
+    assert ld_stats.sum() >= 0
 
-# Test 5: Import params and size_history
-print("\n5. Testing params and size_history...")
-try:
-    from phlash.params import MCMCParams
-    from phlash.size_history import SizeHistory, DemographicModel
-    print("   ✓ params and size_history imported successfully")
-except Exception as e:
-    print(f"   ✗ Import failed: {e}")
-    sys.exit(1)
 
-# Test 6: Create demo model and test to_demes
-print("\n6. Testing SizeHistory.to_demes()...")
-try:
-    t = jnp.array([0.0, 100.0, 1000.0, 10000.0])
-    c = jnp.array([1.0, 0.5, 2.0, 1.0])
-    eta = SizeHistory(t=t, c=c)
-    g = eta.to_demes()
-    print(f"   demes graph: {g}")
-    print("   ✓ to_demes works")
-except Exception as e:
-    print(f"   ✗ to_demes failed: {e}")
+def test_log_density_with_and_without_ld_term():
+    """Simulate log_density evaluation toggling the LD contribution."""
+    rng = np.random.default_rng(0)
+    het_matrix = (rng.random((8, 300)) < 0.05).astype(np.int8)
+    kern = get_kernel(M=16, data=het_matrix, double_precision=True)
 
-# Test 7: Test mcmc imports
-print("\n7. Testing mcmc.py imports...")
-try:
-    from phlash.mcmc import fit
-    print("   ✓ mcmc.py imported successfully")
-except Exception as e:
-    print(f"   ⚠ mcmc.py import failed (may need pysam): {e}")
+    # Simple AFS with the correct dimension (n-1 == 15 when M=16)
+    afs = jnp.ones(15)
 
-print("\n" + "="*50)
-print("LD implementation tests completed!")
-print("="*50)
+    mcp = MCMCParams.from_linear(
+        pattern="16*1",
+        t1=1e-3,
+        tM=1.0,
+        c=jnp.ones(16),
+        theta=1e-2,
+        rho=1e-2,
+    )
+
+    ld_bins = jnp.array(DEFAULT_BP_BINS[:5])
+    ld_stats = compute_empirical_ld_from_het_matrix(
+        het_matrix, window_size=1, bp_bins=np.asarray(ld_bins)
+    )
+    assert ld_stats is not None
+    if ld_stats.sum() == 0:
+        ld_stats = ld_stats + 1e-3
+    ld_stats = jnp.array(ld_stats)
+
+    base_kwargs = dict(
+        inds=jnp.arange(het_matrix.shape[0]),
+        warmup=jnp.full((het_matrix.shape[0], 1), -1, dtype=jnp.int8),
+        kern=kern,
+        afs=afs,
+        afs_transform=None,
+        ld_stats=ld_stats,
+        ld_bp_bins=ld_bins,
+        ld_recomb_rate=DEFAULT_RECOMB_RATE,
+    )
+
+    weights_no_ld = jnp.array([1.0, het_matrix.shape[0], 1.0, 0.0])
+    weights_with_ld = weights_no_ld.at[3].set(1.0)
+
+    ll_no_ld = log_density(mcp, c=weights_no_ld, **base_kwargs)
+    ll_with_ld = log_density(mcp, c=weights_with_ld, **base_kwargs)
+
+    assert jnp.isfinite(ll_no_ld)
+    assert jnp.isfinite(ll_with_ld)
+    assert ll_with_ld != ll_no_ld

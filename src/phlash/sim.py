@@ -129,7 +129,13 @@ def _get_N0(dm: stdpopsim.DemographicModel, pop_dict: dict) -> float:
     # this involves numerical integration and can be really slow, so it's cached.
     # pop_dict = {pop: # of diploids}, but this function wants {pop: # of ploids}.
     logger.debug("Computing N0 for dm={} pops={}", dm.id, pop_dict)
-    return dm.model.debug().mean_coalescence_time(pop_dict, max_iter=20, rtol=0.01) / 2
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=RuntimeWarning, module=r"msprime\.demography"
+        )
+        return dm.model.debug().mean_coalescence_time(
+            pop_dict, max_iter=20, rtol=0.01
+        ) / 2
 
 
 def _params_for_sim(
@@ -175,7 +181,11 @@ def _simulate(
 
 def _simulate_msp(model, chrom, pop_dict, seed, return_vcf) -> Contig | str:
     engine = stdpopsim.get_engine("msprime")
-    ts = engine.simulate(model, chrom, pop_dict, seed=seed)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=RuntimeWarning, module=r"msprime\.demography"
+        )
+        ts = engine.simulate(model, chrom, pop_dict, seed=seed)
     if return_vcf:
 
         def pt(x):
