@@ -87,25 +87,40 @@ def log_density(
     # l4: LD likelihood term
     if ld_stats is not None and ld_bp_bins is not None:
         from phlash.ld import compute_expected_ld_jax
-        
-        # Compute expected LD from demographic model
-        expected_ld = compute_expected_ld_jax(
-            dm.eta,
-            dm.theta,
-            n_samples=20,
-            bp_bins=ld_bp_bins,
-            recomb_rate=ld_recomb_rate,
-        )
-        
-        # Normalize for likelihood computation
-        expected_ld_norm = expected_ld / expected_ld.sum()
-        expected_ld_norm = jnp.maximum(expected_ld_norm, 1e-20)
-        
-        # Normalize observed LD for comparison
-        ld_stats_norm = ld_stats / ld_stats.sum()
-        
-        # xlogy likelihood: sum of observed * log(expected)
-        l4 = xlogy(ld_stats_norm, expected_ld_norm).sum()
+
+        ld_stats_sum = ld_stats.sum()
+
+        def _ld_term(_: None) -> float:
+            # Compute expected LD from demographic model
+            expected_ld = compute_expected_ld_jax(
+                dm.eta,
+                dm.theta,
+                n_samples=20,
+                bp_bins=ld_bp_bins,
+                recomb_rate=ld_recomb_rate,
+            )
+
+            expected_ld_sum = expected_ld.sum()
+
+            def _ld_term_expected(_: None) -> float:
+                # Normalize for likelihood computation
+                expected_ld_norm = expected_ld / jnp.maximum(expected_ld_sum, 1e-20)
+                expected_ld_norm = jnp.maximum(expected_ld_norm, 1e-20)
+
+                # Normalize observed LD for comparison
+                ld_stats_norm = ld_stats / jnp.maximum(ld_stats_sum, 1e-20)
+
+                # xlogy likelihood: sum of observed * log(expected)
+                return xlogy(ld_stats_norm, expected_ld_norm).sum()
+
+            return jax.lax.cond(
+                expected_ld_sum > 0,
+                _ld_term_expected,
+                lambda _: 0.0,
+                operand=None,
+            )
+
+        l4 = jax.lax.cond(ld_stats_sum > 0, _ld_term, lambda _: 0.0, operand=None)
     else:
         l4 = 0.0
     
